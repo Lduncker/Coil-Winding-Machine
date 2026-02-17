@@ -11,7 +11,7 @@ New Features:
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
-import threading, sys, serial, time
+import threading, sys, serial, time, json, os
 from enum import Enum
 from dataclasses import dataclass
 from typing import Optional
@@ -327,6 +327,29 @@ class ParkerMotorController:
         except Exception as exc:
             print(f"E‑stop error: {exc}")
 
+    def stop_motor(self, node: MotorNode):
+        """Stop a specific motor using the S (Stop) command"""
+        try:
+            self._tx(f"{node.value}S")
+        except Exception as exc:
+            print(f"Stop error: {exc}")
+
+    def jog_motor(self, node: MotorNode, direction: int, velocity: float = 1.0):
+        """Jog a motor in a direction (+1 or -1) at specified velocity"""
+        try:
+            # Set velocity and acceleration for jog
+            self._tx(f"{node.value}V{velocity}")
+            self._tx(f"{node.value}A1.0") # Moderate acceleration
+
+            # Set large distance in direction
+            dist = 500000 * direction # Very large distance
+            self._tx(f"{node.value}D{dist}")
+
+            # Go
+            self._tx(f"{node.value}G")
+        except Exception as exc:
+            print(f"Jog error: {exc}")
+
 # ─── Enhanced GUI with Homing Features ───────────────────────────────────────
 class WinderGUI(tk.Tk):
     def __init__(self):
@@ -347,7 +370,13 @@ class WinderGUI(tk.Tk):
         self.var_baud = tk.IntVar(value=self.ctrl.baud)
         self.var_fiber_side = tk.StringVar(value="Left")
 
+        # Jog state
+        self.is_jogging = False
+        self.jog_speed = 2.0
+
         self._build_ui()
+        self._setup_bindings()
+        self.load_config()
 
         # Redirect stdout to log
         self.redirector = TextRedirector(self.log_text)
@@ -361,6 +390,20 @@ class WinderGUI(tk.Tk):
         self._build_motor_params_frame()
         self._build_control_frame()
         self._build_log_frame()
+        self._build_save_load_frame()
+
+    def _setup_bindings(self):
+        self.bind('<Left>', self.on_left_press)
+        self.bind('<KeyRelease-Left>', self.on_left_release)
+        self.bind('<Right>', self.on_right_press)
+        self.bind('<KeyRelease-Right>', self.on_right_release)
+
+    def _build_save_load_frame(self):
+        frame = ttk.Frame(self)
+        frame.pack(fill="x", padx=10, pady=5)
+
+        ttk.Button(frame, text="Save Settings", command=self.save_config).pack(side="right", padx=5)
+
 
     def _build_connection_frame(self):
         frame = ttk.LabelFrame(self, text="Connection")
@@ -657,10 +700,111 @@ class WinderGUI(tk.Tk):
         self.log_text.delete(1.0, tk.END)
 
     def on_close(self):
+        self.save_config()
         if self.ctrl.is_connected:
             self.ctrl.disconnect()
         sys.stdout = sys.__stdout__
         self.destroy()
+
+    def get_config_dict(self):
+        return {
+            "port": self.var_port.get(),
+            "baud": self.var_baud.get(),
+            "fiber_side": self.var_fiber_side.get(),
+            "corkscrew": {
+                "vel": self.cork_vel.get(),
+                "dist": self.cork_dist.get(),
+                "accel": self.cork_accel.get(),
+                "res": self.cork_res.get()
+            },
+            "left_fiber": {
+                "vel": self.left_vel.get(),
+                "dist": self.left_dist.get(),
+                "accel": self.left_accel.get(),
+                "res": self.left_res.get()
+            },
+            "right_fiber": {
+                "vel": self.right_vel.get(),
+                "dist": self.right_dist.get(),
+                "accel": self.right_accel.get(),
+                "res": self.right_res.get()
+            }
+        }
+
+    def save_config(self):
+        try:
+            config = self.get_config_dict()
+            with open("winder_config.json", "w") as f:
+                json.dump(config, f, indent=4)
+            print("Settings saved to winder_config.json")
+        except Exception as e:
+            print(f"Error saving config: {e}")
+
+    def load_config(self):
+        if not os.path.exists("winder_config.json"):
+            return
+
+        try:
+            with open("winder_config.json", "r") as f:
+                config = json.load(f)
+
+            self.var_port.set(config.get("port", self.ctrl.port))
+            self.var_baud.set(config.get("baud", self.ctrl.baud))
+            self.var_fiber_side.set(config.get("fiber_side", "Left"))
+
+            if "corkscrew" in config:
+                self.cork_vel.set(config["corkscrew"].get("vel", "5.0"))
+                self.cork_dist.set(config["corkscrew"].get("dist", "500"))
+                self.cork_accel.set(config["corkscrew"].get("accel", "2.0"))
+                self.cork_res.set(config["corkscrew"].get("res", "1000"))
+
+            if "left_fiber" in config:
+                self.left_vel.set(config["left_fiber"].get("vel", "20.0"))
+                self.left_dist.set(config["left_fiber"].get("dist", "100000"))
+                self.left_accel.set(config["left_fiber"].get("accel", "5.0"))
+                self.left_res.set(config["left_fiber"].get("res", "1000"))
+
+            if "right_fiber" in config:
+                self.right_vel.set(config["right_fiber"].get("vel", "20.0"))
+                self.right_dist.set(config["right_fiber"].get("dist", "-100000"))
+                self.right_accel.set(config["right_fiber"].get("accel", "5.0"))
+                self.right_res.set(config["right_fiber"].get("res", "1000"))
+
+            print("Settings loaded from winder_config.json")
+        except Exception as e:
+            print(f"Error loading config: {e}")
+
+    def on_left_press(self, event):
+        if not self.ctrl.is_connected or self.is_jogging:
+            return
+        self.is_jogging = True
+        print("Jogging LEFT...")
+        threading.Thread(target=self.ctrl.jog_motor,
+                        args=(MotorNode.CORKSCREW, -1, self.jog_speed),
+                        daemon=True).start()
+
+    def on_left_release(self, event):
+        if not self.ctrl.is_connected:
+            return
+        self.is_jogging = False
+        print("Stopping jog...")
+        self.ctrl.stop_motor(MotorNode.CORKSCREW)
+
+    def on_right_press(self, event):
+        if not self.ctrl.is_connected or self.is_jogging:
+            return
+        self.is_jogging = True
+        print("Jogging RIGHT...")
+        threading.Thread(target=self.ctrl.jog_motor,
+                        args=(MotorNode.CORKSCREW, 1, self.jog_speed),
+                        daemon=True).start()
+
+    def on_right_release(self, event):
+        if not self.ctrl.is_connected:
+            return
+        self.is_jogging = False
+        print("Stopping jog...")
+        self.ctrl.stop_motor(MotorNode.CORKSCREW)
 
 def main():
     try:
