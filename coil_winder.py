@@ -48,6 +48,7 @@ class ParkerMotorController:
         self.timeout = timeout
         self.ser: Optional[serial.Serial] = None
         self.is_connected = False
+        self._lock = threading.Lock()
 
     def connect(self) -> bool:
         try:
@@ -79,14 +80,15 @@ class ParkerMotorController:
         self.is_connected = False
 
     def _tx(self, pkt: str, pause: float = 0.02) -> str:
-        if not self.is_connected:
-            raise RuntimeError("Serial port not open")
-        self.ser.write((pkt + "\r").encode())
-        self.ser.flush()
-        reply = self.ser.readline().decode(errors="ignore").strip()
-        print(f"sent {pkt!r}  ↩ {reply!r}")
-        time.sleep(pause)
-        return reply
+        with self._lock:
+            if not self.is_connected:
+                raise RuntimeError("Serial port not open")
+            self.ser.write((pkt + "\r").encode())
+            self.ser.flush()
+            reply = self.ser.readline().decode(errors="ignore").strip()
+            print(f"sent {pkt!r}  ↩ {reply!r}")
+            time.sleep(pause)
+            return reply
 
     def _get_position(self, node: MotorNode) -> int:
         """Get current position of a motor"""
@@ -105,7 +107,7 @@ class ParkerMotorController:
         self._tx(f"{node.value}MR{params.resolution}")
 
         # Velocity and acceleration are always positive
-        vel = abs(int(params.velocity))
+        vel = abs(float(params.velocity))
         acc = abs(params.accel)
 
         # Handle distance direction explicitly
@@ -156,8 +158,9 @@ class ParkerMotorController:
 
     def estop(self):
         try:
-            self._tx("Z", pause=0)
-            print(">>> EMERGENCY STOP (Z) <<<")
+            for node in MotorNode:
+                self._tx(f"{node.value}Z", pause=0)
+            print(">>> EMERGENCY STOP (Z) SENT TO ALL NODES <<<")
         except Exception as exc:
             print(f"E‑stop error: {exc}")
 
@@ -168,7 +171,7 @@ class WinderGUI(tk.Tk):
         self.title("Enhanced Copper/Fiber Winder Control")
         self.geometry("900x750")
 
-        self.ctrl = ParkerMotorController("/dev/ttyUSB0", 9600)
+        self.ctrl = ParkerMotorController("/dev/cu.usbserial-FT57KM630", 9600)
         self.is_running = False
 
         # Motor parameters
