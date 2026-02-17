@@ -103,6 +103,9 @@ class ParkerMotorController:
 
 
     def _queue_move(self, node: MotorNode, params: MotorParams):
+        # Set Normal Mode (preset moves) explicitly since Jog uses Continuous Mode
+        self._tx(f"{node.value}MN")
+
         # Set resolution first
         self._tx(f"{node.value}MR{params.resolution}")
 
@@ -164,6 +167,33 @@ class ParkerMotorController:
         except Exception as exc:
             print(f"E‑stop error: {exc}")
 
+    def jog(self, node: MotorNode, direction: int, velocity: float):
+        """
+        Jog a motor in a direction (-1 or 1).
+        Uses MC (Mode Continuous).
+        """
+        try:
+            # Set Continuous Mode
+            self._tx(f"{node.value}MC")
+            # Set Accel/Vel (use a default reasonable accel for jogging)
+            self._tx(f"{node.value}A1")
+            self._tx(f"{node.value}V{abs(velocity)}")
+            # Command direction
+            if direction > 0:
+                self._tx(f"{node.value}+")
+            else:
+                self._tx(f"{node.value}-")
+            print(f"Jogging {node.name} direction {direction}")
+        except Exception as e:
+            print(f"Jog error: {e}")
+
+    def stop_motor(self, node: MotorNode):
+        try:
+            self._tx(f"{node.value}S") # Stop
+            print(f"Stopping {node.name}")
+        except Exception as e:
+            print(f"Stop error: {e}")
+
 # ─── Enhanced GUI with Homing Features ───────────────────────────────────────
 class WinderGUI(tk.Tk):
     def __init__(self):
@@ -173,6 +203,7 @@ class WinderGUI(tk.Tk):
 
         self.ctrl = ParkerMotorController("/dev/cu.usbserial-FT57KM630", 9600)
         self.is_running = False
+        self.jogging_direction = 0  # 0=stopped, -1=left, 1=right
 
         # Motor parameters
         self.corkscrew_params = MotorParams(velocity=5.0, distance=500, accel=2.0, resolution=1000)
@@ -191,6 +222,12 @@ class WinderGUI(tk.Tk):
         sys.stdout = self.redirector
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Bind arrow keys for jogging
+        self.bind('<Left>', lambda e: self.on_jog_press(-1))
+        self.bind('<Right>', lambda e: self.on_jog_press(1))
+        self.bind('<KeyRelease-Left>', lambda e: self.on_jog_release(-1))
+        self.bind('<KeyRelease-Right>', lambda e: self.on_jog_release(1))
 
     def _build_ui(self):
         self._build_connection_frame()
@@ -405,10 +442,34 @@ class WinderGUI(tk.Tk):
         if self.ctrl.is_connected:
             self.ctrl.estop()
             self.is_running = False
+            self.jogging_direction = 0
             self.btn_run.config(state="normal")
             self.lbl_operation_status.config(text="EMERGENCY STOPPED - Check system before continuing")
         else:
             messagebox.showwarning("Warning", "Not connected to send emergency stop.")
+
+    def on_jog_press(self, direction):
+        if not self.ctrl.is_connected: return
+        if self.is_running: return # Don't jog while automated pass is running
+
+        # Prevent key repeat from sending multiple commands
+        if self.jogging_direction == direction: return
+
+        self.jogging_direction = direction
+
+        # Use current corkscrew velocity from UI, default to 1.0 if invalid
+        try:
+            vel = float(self.cork_vel.get())
+        except:
+            vel = 1.0
+
+        self.ctrl.jog(MotorNode.CORKSCREW, direction, vel)
+
+    def on_jog_release(self, direction):
+        # Only stop if we are currently jogging in the released direction
+        if self.jogging_direction == direction:
+             self.ctrl.stop_motor(MotorNode.CORKSCREW)
+             self.jogging_direction = 0
 
     def clear_log(self):
         self.log_text.delete(1.0, tk.END)
