@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Enhanced Fiber‑winder GUI with automatic magnet end detection via limit switches.
+Enhanced Fiber‑winder GUI - Manual Mode
 
-New Features:
-- Limit switch integration for automatic end detection
-- Homing sequence to establish reference position
-- Automatic distance calculation based on magnet length
-- Safety checks to prevent overrun
+Features:
+- Manual control via arrow keys (jogging)
+- Parameter persistence (auto-save/load)
+- Manual distance setting for fiber passes
 """
 
 import tkinter as tk
@@ -29,13 +28,6 @@ class MotorParams:
     accel:    float = 0.3     # rev/s²
     resolution: int = 1000    # MR parameter (steps/rev)
 
-@dataclass
-class MagnetLimits:
-    left_limit: int = 0       # Position of left end (steps)
-    right_limit: int = 0      # Position of right end (steps)
-    is_homed: bool = False    # Whether homing has been completed
-    total_length: int = 0     # Total magnet length in steps
-
 # ─── Redirect print() into the GUI ────────────────────────────────────────────
 class TextRedirector:
     def __init__(self, widget: tk.Text):
@@ -56,7 +48,6 @@ class ParkerMotorController:
         self.timeout = timeout
         self.ser: Optional[serial.Serial] = None
         self.is_connected = False
-        self.magnet_limits = MagnetLimits()
 
     def connect(self) -> bool:
         try:
@@ -108,151 +99,10 @@ class ParkerMotorController:
         except:
             return 0
 
-    def _check_limit_switches(self, node: MotorNode) -> dict:
-        """Check status of limit switches for a motor"""
-        try:
-            # Read input status - this depends on your Parker model
-            reply = self._tx(f"{node.value}IS")
-            # Parse limit switch status from input register
-            # This is model-specific - adjust according to your setup
-
-            # Example parsing (adjust for your specific Parker model):
-            # Assuming IS returns a hex value where bits indicate switch states
-            status_val = int(reply.split('IS')[1], 16) if 'IS' in reply else 0
-
-            return {
-                'left_limit': bool(status_val & 0x01),   # Bit 0 = left limit
-                'right_limit': bool(status_val & 0x02),  # Bit 1 = right limit
-                'home_switch': bool(status_val & 0x04)   # Bit 2 = home switch
-            }
-        except:
-            return {'left_limit': False, 'right_limit': False, 'home_switch': False}
-
-    def home_corkscrew(self) -> bool:
-        """Home the corkscrew axis to establish reference position"""
-        try:
-            print("Starting corkscrew homing sequence...")
-
-            # Move towards home switch at slow speed
-            self._tx(f"{MotorNode.CORKSCREW.value}MR1000")  # Set resolution
-            self._tx(f"{MotorNode.CORKSCREW.value}A0.5")    # Slow acceleration
-            self._tx(f"{MotorNode.CORKSCREW.value}V1")      # Slow velocity
-
-            # Start move towards home (negative direction)
-            self._tx(f"{MotorNode.CORKSCREW.value}D-50000")  # Large distance
-            self._tx(f"{MotorNode.CORKSCREW.value}G")
-
-            # Wait for home switch activation
-            timeout = 30  # 30 second timeout
-            start_time = time.time()
-
-            while time.time() - start_time < timeout:
-                switches = self._check_limit_switches(MotorNode.CORKSCREW)
-                if switches['home_switch']:
-                    # Stop when home switch is triggered
-                    self._tx("Z")  # Emergency stop
-                    time.sleep(0.1)
-
-                    # Set current position as zero
-                    self._tx(f"{MotorNode.CORKSCREW.value}SP0")
-                    print("Corkscrew homed successfully at position 0")
-
-                    # Now find the limits
-                    return self._find_magnet_limits()
-
-                time.sleep(0.1)
-
-            print("Homing timeout - home switch not found")
-            return False
-
-        except Exception as exc:
-            print(f"Homing error: {exc}")
-            return False
-
-    def _find_magnet_limits(self) -> bool:
-        """Find the left and right limits of the magnet"""
-        try:
-            print("Finding magnet limits...")
-
-            # Move to left limit
-            self._tx(f"{MotorNode.CORKSCREW.value}V2")      # Medium velocity
-            self._tx(f"{MotorNode.CORKSCREW.value}D-25000") # Move left
-            self._tx(f"{MotorNode.CORKSCREW.value}G")
-
-            # Wait for left limit switch
-            timeout = 20
-            start_time = time.time()
-
-            while time.time() - start_time < timeout:
-                switches = self._check_limit_switches(MotorNode.CORKSCREW)
-                if switches['left_limit']:
-                    self._tx("Z")  # Stop
-                    time.sleep(0.1)
-                    self.magnet_limits.left_limit = self._get_position(MotorNode.CORKSCREW)
-                    print(f"Left limit found at position: {self.magnet_limits.left_limit}")
-                    break
-                time.sleep(0.1)
-            else:
-                print("Left limit switch not found")
-                return False
-
-            # Move to right limit
-            self._tx(f"{MotorNode.CORKSCREW.value}D50000")  # Move right
-            self._tx(f"{MotorNode.CORKSCREW.value}G")
-
-            start_time = time.time()
-            while time.time() - start_time < timeout:
-                switches = self._check_limit_switches(MotorNode.CORKSCREW)
-                if switches['right_limit']:
-                    self._tx("Z")  # Stop
-                    time.sleep(0.1)
-                    self.magnet_limits.right_limit = self._get_position(MotorNode.CORKSCREW)
-                    print(f"Right limit found at position: {self.magnet_limits.right_limit}")
-                    break
-                time.sleep(0.1)
-            else:
-                print("Right limit switch not found")
-                return False
-
-            # Calculate total length
-            self.magnet_limits.total_length = abs(self.magnet_limits.right_limit - self.magnet_limits.left_limit)
-            self.magnet_limits.is_homed = True
-
-            print(f"Magnet limits established:")
-            print(f"  Left: {self.magnet_limits.left_limit} steps")
-            print(f"  Right: {self.magnet_limits.right_limit} steps")
-            print(f"  Total length: {self.magnet_limits.total_length} steps")
-
-            # Return to home position
-            self._tx(f"{MotorNode.CORKSCREW.value}D0")
-            self._tx(f"{MotorNode.CORKSCREW.value}G")
-
-            return True
-
-        except Exception as exc:
-            print(f"Limit finding error: {exc}")
-            return False
 
     def _queue_move(self, node: MotorNode, params: MotorParams):
         # Set resolution first
         self._tx(f"{node.value}MR{params.resolution}")
-
-        # For corkscrew, check if we're within limits
-        if node == MotorNode.CORKSCREW and self.magnet_limits.is_homed:
-            current_pos = self._get_position(node)
-            target_pos = current_pos + params.distance
-
-            # Safety check
-            if (target_pos < self.magnet_limits.left_limit or
-                target_pos > self.magnet_limits.right_limit):
-                print(f"WARNING: Target position {target_pos} exceeds magnet limits!")
-                print(f"Limiting to safe range: {self.magnet_limits.left_limit} to {self.magnet_limits.right_limit}")
-
-                # Adjust distance to stay within limits
-                if target_pos < self.magnet_limits.left_limit:
-                    params.distance = self.magnet_limits.left_limit - current_pos
-                else:
-                    params.distance = self.magnet_limits.right_limit - current_pos
 
         # Velocity and acceleration are always positive
         vel = abs(int(params.velocity))
@@ -274,21 +124,10 @@ class ParkerMotorController:
     def _go(self, node: MotorNode):
         self._tx(f"{node.value}G")
 
-    def calculate_full_pass_distance(self) -> int:
-        """Calculate distance for a full pass across the magnet"""
-        if not self.magnet_limits.is_homed:
-            return 2500  # Default fallback
-        return self.magnet_limits.total_length
-
     def run_left_fiber_pass(self, corkscrew_params: MotorParams, left_fiber_params: MotorParams):
         """Run one fiber pass using left fiber winder + corkscrew"""
         try:
             print("Starting LEFT FIBER PASS (Corkscrew + Left Fiber)")
-
-            # Use calculated distance if homed
-            if self.magnet_limits.is_homed:
-                corkscrew_params.distance = self.calculate_full_pass_distance()
-                print(f"Using calculated corkscrew distance: {corkscrew_params.distance} steps")
 
             self._queue_move(MotorNode.CORKSCREW, corkscrew_params)
             self._queue_move(MotorNode.LEFT_FIBER, left_fiber_params)
@@ -304,11 +143,6 @@ class ParkerMotorController:
         """Run one fiber pass using right fiber winder + corkscrew"""
         try:
             print("Starting RIGHT FIBER PASS (Corkscrew + Right Fiber)")
-
-            # Use calculated distance if homed
-            if self.magnet_limits.is_homed:
-                corkscrew_params.distance = -self.calculate_full_pass_distance()  # Negative for return
-                print(f"Using calculated corkscrew distance: {corkscrew_params.distance} steps")
 
             self._queue_move(MotorNode.CORKSCREW, corkscrew_params)
             self._queue_move(MotorNode.RIGHT_FIBER, right_fiber_params)
@@ -357,7 +191,6 @@ class WinderGUI(tk.Tk):
 
     def _build_ui(self):
         self._build_connection_frame()
-        self._build_homing_frame()
         self._build_motor_params_frame()
         self._build_control_frame()
         self._build_log_frame()
@@ -378,22 +211,6 @@ class WinderGUI(tk.Tk):
         self.lbl_status = ttk.Label(frame, text="Status: disconnected")
         self.lbl_status.grid(row=1, column=2, columnspan=2, sticky="w", padx=10)
 
-    def _build_homing_frame(self):
-        frame = ttk.LabelFrame(self, text="Magnet Limits & Homing")
-        frame.pack(fill="x", padx=10, pady=5)
-
-        # Homing button
-        self.btn_home = ttk.Button(frame, text="HOME CORKSCREW & FIND LIMITS",
-                                  command=self.on_home, state="disabled")
-        self.btn_home.grid(row=0, column=0, padx=5, pady=5)
-
-        # Status display
-        self.lbl_home_status = ttk.Label(frame, text="Status: Not homed")
-        self.lbl_home_status.grid(row=0, column=1, sticky="w", padx=10)
-
-        # Limits display
-        self.lbl_limits = ttk.Label(frame, text="Magnet limits: Unknown")
-        self.lbl_limits.grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
     def _build_motor_params_frame(self):
         frame = ttk.LabelFrame(self, text="Motor Parameters")
@@ -407,7 +224,7 @@ class WinderGUI(tk.Tk):
         ttk.Label(frame, text="Resolution (steps/rev)").grid(row=0, column=4, padx=5, pady=2)
 
         # Corkscrew parameters
-        ttk.Label(frame, text="Corkscrew*").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        ttk.Label(frame, text="Corkscrew").grid(row=1, column=0, sticky="w", padx=5, pady=2)
         self.cork_vel = tk.StringVar(value=str(self.corkscrew_params.velocity))
         self.cork_dist = tk.StringVar(value=str(self.corkscrew_params.distance))
         self.cork_accel = tk.StringVar(value=str(self.corkscrew_params.accel))
@@ -418,10 +235,6 @@ class WinderGUI(tk.Tk):
         distance_entry.grid(row=1, column=2, padx=5, pady=2)
         ttk.Entry(frame, width=10, textvariable=self.cork_accel).grid(row=1, column=3, padx=5, pady=2)
         ttk.Entry(frame, width=10, textvariable=self.cork_res).grid(row=1, column=4, padx=5, pady=2)
-
-        # Note about automatic distance
-        ttk.Label(frame, text="* Distance auto-calculated if homed",
-                 font=("TkDefaultFont", 8), foreground="blue").grid(row=1, column=5, sticky="w", padx=5)
 
         # Left & Right Fiber parameters (unchanged)
         ttk.Label(frame, text="Left Fiber").grid(row=2, column=0, sticky="w", padx=5, pady=2)
@@ -454,14 +267,12 @@ class WinderGUI(tk.Tk):
         instruction_frame = ttk.Frame(frame)
         instruction_frame.grid(row=0, column=0, columnspan=4, pady=5, sticky="w")
 
-        ttk.Label(instruction_frame, text="ENHANCED WORKFLOW:", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
-        ttk.Label(instruction_frame, text="1. Connect and run HOMING to establish magnet limits",
+        ttk.Label(instruction_frame, text="WORKFLOW:", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+        ttk.Label(instruction_frame, text="1. Set motor parameters (velocity, distance, etc.)",
                  font=("TkDefaultFont", 9)).pack(anchor="w", padx=10)
         ttk.Label(instruction_frame, text="2. Wind copper coil by hand (one pass across magnet)",
                  font=("TkDefaultFont", 9)).pack(anchor="w", padx=10)
         ttk.Label(instruction_frame, text="3. Select fiber winder side and click 'Run Fiber Pass'",
-                 font=("TkDefaultFont", 9)).pack(anchor="w", padx=10)
-        ttk.Label(instruction_frame, text="4. System automatically uses precise magnet limits",
                  font=("TkDefaultFont", 9)).pack(anchor="w", padx=10)
 
         # Fiber winder selection
@@ -481,8 +292,9 @@ class WinderGUI(tk.Tk):
         self.btn_stop.grid(row=1, column=3, rowspan=2, padx=10, pady=5)
 
         # Status
-        self.lbl_operation_status = ttk.Label(frame, text="Connect and home system first")
+        self.lbl_operation_status = ttk.Label(frame, text="Connect to start")
         self.lbl_operation_status.grid(row=3, column=0, columnspan=4, pady=5)
+
 
     def _build_log_frame(self):
         frame = ttk.LabelFrame(self, text="Communication Log")
@@ -515,17 +327,6 @@ class WinderGUI(tk.Tk):
             messagebox.showerror("Parameter Error", f"Invalid parameter value: {e}")
             return False
 
-    def _update_limits_display(self):
-        """Update the limits display in the GUI"""
-        if self.ctrl.magnet_limits.is_homed:
-            limits_text = (f"Left: {self.ctrl.magnet_limits.left_limit}, "
-                         f"Right: {self.ctrl.magnet_limits.right_limit}, "
-                         f"Length: {self.ctrl.magnet_limits.total_length} steps")
-            self.lbl_limits.config(text=f"Magnet limits: {limits_text}")
-            self.lbl_home_status.config(text="Status: Homed ✓", foreground="green")
-        else:
-            self.lbl_limits.config(text="Magnet limits: Not homed")
-            self.lbl_home_status.config(text="Status: Not homed", foreground="red")
 
     def on_connect(self):
         if not self.ctrl.is_connected:
@@ -534,71 +335,24 @@ class WinderGUI(tk.Tk):
 
             if self.ctrl.connect():
                 self.btn_connect.config(text="Disconnect")
-                self.btn_home.config(state="normal")
+                self.btn_run.config(state="normal")
                 self.lbl_status.config(text="Status: connected")
-                self.lbl_operation_status.config(text="Run homing sequence to establish limits")
+                self.lbl_operation_status.config(text="Ready")
                 print("Connection established successfully.")
             else:
                 messagebox.showerror("Connection Error", "Failed to connect to serial port.")
         else:
             self.ctrl.disconnect()
             self.btn_connect.config(text="Connect")
-            self.btn_home.config(state="disabled")
             self.btn_run.config(state="disabled")
             self.lbl_status.config(text="Status: disconnected")
             self.is_running = False
 
-    def on_home(self):
-        if not self.ctrl.is_connected:
-            messagebox.showerror("Error", "Not connected to serial port.")
-            return
-
-        # Confirm homing operation
-        result = messagebox.askyesno("Confirm Homing",
-                                   "This will move the corkscrew to find home position and magnet limits.\n\n"
-                                   "Ensure the travel path is clear!\n\n"
-                                   "Continue with homing?")
-        if not result:
-            return
-
-        self.btn_home.config(state="disabled")
-        self.lbl_home_status.config(text="Status: Homing in progress...", foreground="orange")
-
-        def home_thread():
-            try:
-                success = self.ctrl.home_corkscrew()
-                self.after(0, lambda: self.on_home_complete(success))
-            except Exception as e:
-                self.after(0, lambda: self.on_home_error(str(e)))
-
-        threading.Thread(target=home_thread, daemon=True).start()
-
-    def on_home_complete(self, success: bool):
-        self.btn_home.config(state="normal")
-        if success:
-            self.btn_run.config(state="normal")
-            self.lbl_operation_status.config(text="Ready for copper winding (by hand)")
-            print("Homing completed successfully!")
-        else:
-            self.lbl_operation_status.config(text="Homing failed - check limit switches")
-            messagebox.showerror("Homing Error", "Failed to complete homing sequence. Check limit switches and connections.")
-
-        self._update_limits_display()
-
-    def on_home_error(self, error_msg: str):
-        self.btn_home.config(state="normal")
-        self.lbl_home_status.config(text="Status: Homing error", foreground="red")
-        self.lbl_operation_status.config(text="Homing error - check system")
-        messagebox.showerror("Homing Error", f"Homing failed: {error_msg}")
 
     def on_run(self):
         if not self.ctrl.is_connected:
             messagebox.showerror("Error", "Not connected to serial port.")
             return
-
-        if not self.ctrl.magnet_limits.is_homed:
-            messagebox.showwarning("Warning", "System not homed. Run homing sequence first for precise limits.")
-            # Allow manual operation but warn user
 
         if self.is_running:
             messagebox.showwarning("Warning", "Fiber pass already running.")
