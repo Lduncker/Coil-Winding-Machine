@@ -1,0 +1,23 @@
+{
+    "port": "/dev/ttyUSB0",
+    "baud": 9600,
+    "fiber_side": "Left",
+    "corkscrew": {
+        "vel": "5.0",
+        "dist": "500",
+        "accel": "2.0",
+        "res": "1000"
+    },
+    "left_fiber": {
+        "vel": "20.0",
+        "dist": "200",
+        "accel": "5.0",
+        "res": "1000"
+    },
+    "right_fiber": {
+        "vel": "20.0",
+        "dist": "200",
+        "accel": "5.0",
+        "res": "1000"
+    }
+}
