@@ -10,7 +10,7 @@ Features:
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
-import threading, sys, serial, time
+import threading, sys, serial, time, json, os
 from enum import Enum
 from dataclasses import dataclass
 from typing import Optional
@@ -27,6 +27,8 @@ class MotorParams:
     distance: int   = 2500    # micro‑steps
     accel:    float = 0.3     # rev/s²
     resolution: int = 1000    # MR parameter (steps/rev)
+
+CONFIG_FILE = "winder_config.json"
 
 # ─── Redirect print() into the GUI ────────────────────────────────────────────
 class TextRedirector:
@@ -215,6 +217,7 @@ class WinderGUI(tk.Tk):
         self.var_baud = tk.IntVar(value=self.ctrl.baud)
         self.var_fiber_side = tk.StringVar(value="Left")
 
+        self.load_config()
         self._build_ui()
 
         # Redirect stdout to log
@@ -247,6 +250,8 @@ class WinderGUI(tk.Tk):
 
         self.btn_connect = ttk.Button(frame, text="Connect", command=self.on_connect)
         self.btn_connect.grid(row=1, column=0, columnspan=2, pady=5)
+
+        ttk.Button(frame, text="Save Settings", command=self.save_config).grid(row=1, column=4, padx=5, pady=5)
 
         self.lbl_status = ttk.Label(frame, text="Status: disconnected")
         self.lbl_status.grid(row=1, column=2, columnspan=2, sticky="w", padx=10)
@@ -479,6 +484,72 @@ class WinderGUI(tk.Tk):
             self.ctrl.disconnect()
         sys.stdout = sys.__stdout__
         self.destroy()
+
+    def load_config(self):
+        if not os.path.exists(CONFIG_FILE):
+            print(f"Config file {CONFIG_FILE} not found. Using defaults.")
+            return
+
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+
+            self.var_port.set(config.get("port", self.var_port.get()))
+            self.var_baud.set(config.get("baud", self.var_baud.get()))
+            self.var_fiber_side.set(config.get("fiber_side", "Left"))
+
+            # Helper to load motor params
+            def load_motor(prefix, key):
+                data = config.get(key, {})
+                if not data: return
+                getattr(self, f"{prefix}_vel").set(data.get("vel", "2.0"))
+                getattr(self, f"{prefix}_dist").set(data.get("dist", "2500"))
+                getattr(self, f"{prefix}_accel").set(data.get("accel", "0.3"))
+                getattr(self, f"{prefix}_res").set(data.get("res", "1000"))
+
+            load_motor("cork", "corkscrew")
+            load_motor("left", "left_fiber")
+            load_motor("right", "right_fiber")
+
+            print(f"Loaded configuration from {CONFIG_FILE}")
+
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            messagebox.showwarning("Config Error", f"Failed to load config: {e}")
+
+    def save_config(self):
+        config = {
+            "port": self.var_port.get(),
+            "baud": self.var_baud.get(),
+            "fiber_side": self.var_fiber_side.get(),
+            "corkscrew": {
+                "vel": self.cork_vel.get(),
+                "dist": self.cork_dist.get(),
+                "accel": self.cork_accel.get(),
+                "res": self.cork_res.get()
+            },
+            "left_fiber": {
+                "vel": self.left_vel.get(),
+                "dist": self.left_dist.get(),
+                "accel": self.left_accel.get(),
+                "res": self.left_res.get()
+            },
+            "right_fiber": {
+                "vel": self.right_vel.get(),
+                "dist": self.right_dist.get(),
+                "accel": self.right_accel.get(),
+                "res": self.right_res.get()
+            }
+        }
+
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(config, f, indent=4)
+            print(f"Configuration saved to {CONFIG_FILE}")
+            messagebox.showinfo("Saved", f"Settings saved to {CONFIG_FILE}")
+        except Exception as e:
+            print(f"Error saving config: {e}")
+            messagebox.showerror("Save Error", f"Failed to save config: {e}")
 
 def main():
     try:
