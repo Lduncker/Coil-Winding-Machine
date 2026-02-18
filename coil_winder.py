@@ -217,8 +217,8 @@ class WinderGUI(tk.Tk):
         self.var_baud = tk.IntVar(value=self.ctrl.baud)
         self.var_fiber_side = tk.StringVar(value="Left")
 
-        self.load_config()
         self._build_ui()
+        self.load_config()
 
         # Redirect stdout to log
         self.redirector = TextRedirector(self.log_text)

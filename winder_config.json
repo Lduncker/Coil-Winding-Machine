@@ -10,13 +10,13 @@
     },
     "left_fiber": {
         "vel": "20.0",
-        "dist": "200",
+        "dist": "500",
         "accel": "5.0",
         "res": "1000"
     },
     "right_fiber": {
         "vel": "20.0",
-        "dist": "200",
+        "dist": "-500",
         "accel": "5.0",
         "res": "1000"
     }
