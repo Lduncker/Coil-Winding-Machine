@@ -206,6 +206,8 @@ class WinderGUI(tk.Tk):
         self.ctrl = ParkerMotorController("/dev/cu.usbserial-FT57KM630", 9600)
         self.is_running = False
         self.jogging_direction = 0  # 0=stopped, -1=left, 1=right
+        self.is_manual_mode = False  # Track if we are in manual jogging mode
+        self.jogging_motor_node = None # Track which motor is actually moving
 
         # Motor parameters
         self.corkscrew_params = MotorParams(velocity=5.0, distance=500, accel=2.0, resolution=1000)
@@ -216,6 +218,7 @@ class WinderGUI(tk.Tk):
         self.var_port = tk.StringVar(value=self.ctrl.port)
         self.var_baud = tk.IntVar(value=self.ctrl.baud)
         self.var_fiber_side = tk.StringVar(value="Left")
+        self.var_manual_motor = tk.StringVar(value="Corkscrew")
 
         self._build_ui()
         self.load_config()
@@ -336,9 +339,33 @@ class WinderGUI(tk.Tk):
                                  command=self.on_estop, font=("TkDefaultFont", 10, "bold"))
         self.btn_stop.grid(row=1, column=3, rowspan=2, padx=10, pady=5)
 
+        # Manual Mode Control
+        manual_frame = ttk.LabelFrame(frame, text="Manual Jogging (Arrow Keys)")
+        manual_frame.grid(row=4, column=0, columnspan=4, sticky="ew", padx=5, pady=5)
+
+        self.btn_manual_toggle = ttk.Button(manual_frame, text="Enter Manual Mode", command=self.toggle_manual_mode)
+        self.btn_manual_toggle.pack(side="left", padx=10, pady=5)
+
+        self.manual_controls_frame = ttk.Frame(manual_frame)
+        self.manual_controls_frame.pack(side="left", fill="x", expand=True)
+
+        ttk.Label(self.manual_controls_frame, text="Active Motor:").pack(side="left", padx=5)
+
+        self.rb_man_cork = ttk.Radiobutton(self.manual_controls_frame, text="Corkscrew",
+                                          variable=self.var_manual_motor, value="Corkscrew", state="disabled")
+        self.rb_man_cork.pack(side="left", padx=5)
+
+        self.rb_man_left = ttk.Radiobutton(self.manual_controls_frame, text="Left Fiber",
+                                          variable=self.var_manual_motor, value="Left", state="disabled")
+        self.rb_man_left.pack(side="left", padx=5)
+
+        self.rb_man_right = ttk.Radiobutton(self.manual_controls_frame, text="Right Fiber",
+                                           variable=self.var_manual_motor, value="Right", state="disabled")
+        self.rb_man_right.pack(side="left", padx=5)
+
         # Status
         self.lbl_operation_status = ttk.Label(frame, text="Connect to start")
-        self.lbl_operation_status.grid(row=3, column=0, columnspan=4, pady=5)
+        self.lbl_operation_status.grid(row=5, column=0, columnspan=4, pady=5)
 
 
     def _build_log_frame(self):
@@ -453,27 +480,71 @@ class WinderGUI(tk.Tk):
         else:
             messagebox.showwarning("Warning", "Not connected to send emergency stop.")
 
+    def toggle_manual_mode(self):
+        if not self.ctrl.is_connected:
+            messagebox.showwarning("Connection Required", "Please connect to the controller first.")
+            return
+
+        self.is_manual_mode = not self.is_manual_mode
+
+        if self.is_manual_mode:
+            self.btn_manual_toggle.config(text="Exit Manual Mode")
+            self.btn_run.config(state="disabled") # Disable auto run for safety
+            self.rb_man_cork.config(state="normal")
+            self.rb_man_left.config(state="normal")
+            self.rb_man_right.config(state="normal")
+            self.lbl_operation_status.config(text="MANUAL MODE: Use Left/Right Arrow keys to jog selected motor")
+        else:
+            self.btn_manual_toggle.config(text="Enter Manual Mode")
+            self.btn_run.config(state="normal")
+            self.rb_man_cork.config(state="disabled")
+            self.rb_man_left.config(state="disabled")
+            self.rb_man_right.config(state="disabled")
+            self.lbl_operation_status.config(text="Ready")
+
+            # Ensure we stop any jogging when exiting mode
+            if self.jogging_direction != 0:
+                self.on_jog_release(self.jogging_direction)
+
     def on_jog_press(self, direction):
         if not self.ctrl.is_connected: return
-        if self.is_running: return # Don't jog while automated pass is running
+        if not self.is_manual_mode: return  # Only jog in manual mode
+        if self.is_running: return
 
-        # Prevent key repeat from sending multiple commands
+        # Prevent key repeat
         if self.jogging_direction == direction: return
 
         self.jogging_direction = direction
 
-        # Use current corkscrew velocity from UI, default to 1.0 if invalid
+        # Determine target motor and velocity
+        motor_selection = self.var_manual_motor.get()
+        target_node = MotorNode.CORKSCREW
+        vel_str = self.cork_vel.get()
+
+        if motor_selection == "Left":
+            target_node = MotorNode.LEFT_FIBER
+            vel_str = self.left_vel.get()
+        elif motor_selection == "Right":
+            target_node = MotorNode.RIGHT_FIBER
+            vel_str = self.right_vel.get()
+
+        # Track which motor we are starting to jog
+        self.jogging_motor_node = target_node
+
         try:
-            vel = float(self.cork_vel.get())
+            vel = float(vel_str)
         except:
             vel = 1.0
 
-        self.ctrl.jog(MotorNode.CORKSCREW, direction, vel)
+        self.ctrl.jog(target_node, direction, vel)
 
     def on_jog_release(self, direction):
         # Only stop if we are currently jogging in the released direction
         if self.jogging_direction == direction:
-             self.ctrl.stop_motor(MotorNode.CORKSCREW)
+             if self.jogging_motor_node:
+                 self.ctrl.stop_motor(self.jogging_motor_node)
+
+             self.jogging_motor_node = None
              self.jogging_direction = 0
 
     def clear_log(self):
